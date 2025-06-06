@@ -1,0 +1,9 @@
+Regulatory Compliance Assistant - Test Document
+This is a sample document to test the PDF text extraction feature of your 
+application.
+It contains some simple text across multiple lines.
+Key phrases for future analysis:
+- Data Privacy Regulation 2024 (DPR-2024)
+- Anti-Money Laundering (AML) guidelines
+- Section 3.1.2 on customer due diligence.
+Thank you for testing!

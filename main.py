@@ -3,10 +3,11 @@ from sqlalchemy.orm import Session
 from pathlib import Path
 import os
 from datetime import datetime
+from PyPDF2 import PdfReader # Ensure this import is present at the top
 
 # Import CORSMiddleware
 from fastapi.middleware.cors import CORSMiddleware
-from database import SessionLocal, engine, Base, Document
+from database import SessionLocal, engine, Base, Document, DocumentSchema
 
 
 Base.metadata.create_all(bind=engine)
@@ -15,8 +16,8 @@ app = FastAPI()
 
 # CORS Middleware Configuration
 origins = [
-    "http://localhost:3000",  # Your React app's default address
-    "http://127.0.0.0.1:3000",  # Another common address for localhost
+    "http://localhost:3000",  
+    "http://127.0.0.1:3000",  
     # Add any other origins where your frontend might be running
 ]
 
@@ -50,6 +51,10 @@ async def test_db_connection(db: Session = Depends(get_db)):
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Database connection failed: {e}"
         )
+@app.get("/api/documents/", response_model=list[DocumentSchema]) # Add response_model for better API docs
+async def get_documents(db: Session = Depends(get_db)):
+    documents = db.query(Document).all()
+    return documents
 
 UPLOAD_DIR = Path("uploads")
 if not UPLOAD_DIR.exists():
@@ -58,23 +63,59 @@ if not UPLOAD_DIR.exists():
 @app.post("/api/upload-document/")
 async def upload_document(
     file: UploadFile = File(...),
-    db: Session = Depends(get_db) # NEW: Get database session
+    db: Session = Depends(get_db)
 ):
+    # Added validation for PDF files
+    if not file.filename.lower().endswith(".pdf"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Only PDF files are allowed."
+        )
+
+    # Define paths for the uploaded PDF and the extracted text file
+    pdf_file_location = UPLOAD_DIR / file.filename
+    text_file_location = UPLOAD_DIR / f"{Path(file.filename).stem}.txt" # e.g., "document.pdf" -> "document.txt"
+
+    # Save the uploaded PDF file to disk
     try:
-        # Create a unique file path for the uploaded file
-        file_location = UPLOAD_DIR / file.filename
-        
-        # Save the uploaded file to disk
-        with open(file_location, "wb+") as file_object:
+        with open(pdf_file_location, "wb+") as file_object:
             content = await file.read()
             file_object.write(content)
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to save PDF file: {e}"
+        )
 
-        # NEW: Save document metadata to the database
+    # Extract text from PDF
+    extracted_text = ""
+    try:
+        with open(pdf_file_location, 'rb') as pdf_file:
+            pdf_reader = PdfReader(pdf_file)
+            for page_num in range(len(pdf_reader.pages)):
+                page = pdf_reader.pages[page_num]
+                extracted_text += page.extract_text() or "" # extract_text might return None
+        
+        # Save the extracted text to a .txt file
+        with open(text_file_location, "w", encoding="utf-8") as text_file:
+            text_file.write(extracted_text)
+
+    except Exception as e:
+        # If text extraction fails, attempt to delete the PDF and rollback DB transaction if it started
+        if pdf_file_location.exists():
+            os.remove(pdf_file_location)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to extract text from PDF: {e}. Please ensure the PDF is not password-protected or corrupted."
+        )
+
+    # Save document metadata to the database
+    try:
         db_document = Document(
             filename=file.filename,
-            upload_date=datetime.utcnow(), # Set current UTC time
-            status="pending_processing",  # Initial status
-            path_to_text=str(file_location) # Store the file's path
+            upload_date=datetime.utcnow(),
+            status="processed_text", # Change status to indicate text extraction
+            path_to_text=str(text_file_location) # Store the path to the .txt file
         )
         db.add(db_document)
         db.commit()
@@ -82,13 +123,18 @@ async def upload_document(
 
         return {
             "filename": db_document.filename,
-            "location": db_document.path_to_text,
-            "id": db_document.id, # Return the ID from the database
-            "message": "File uploaded and metadata saved successfully!"
+            "text_location": db_document.path_to_text, # Return text file location
+            "id": db_document.id,
+            "message": "PDF uploaded, text extracted, and metadata saved successfully!"
         }
     except Exception as e:
-        db.rollback() # Rollback changes if an error occurs
+        db.rollback() # Rollback changes if a database error occurs
+        # Clean up files if DB transaction fails
+        if pdf_file_location.exists():
+            os.remove(pdf_file_location)
+        if text_file_location.exists():
+            os.remove(text_file_location)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to upload or save metadata: {e}"
+            detail=f"Failed to save metadata to DB: {e}. Files were cleaned up."
         )

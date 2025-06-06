@@ -3,6 +3,8 @@ from sqlalchemy.orm import sessionmaker, declarative_base
 from datetime import datetime
 import os # Import the os module
 from dotenv import load_dotenv # Import load_dotenv
+from pydantic import BaseModel
+from typing import Optional # For nullable fields
 
 load_dotenv()
 # --- Database Configuration ---
@@ -27,3 +29,13 @@ class Document(Base):
 
     def __repr__(self):
         return f"<Document(id={self.id}, filename='{self.filename}', status='{self.status}')>"
+    
+class DocumentSchema(BaseModel):
+    id: int
+    filename: str
+    upload_date: datetime # FastAPI/Pydantic can handle datetime
+    status: str
+    path_to_text: Optional[str] = None # Optional because it can be nullable in DB
+
+    class Config:
+        from_attributes = True 
