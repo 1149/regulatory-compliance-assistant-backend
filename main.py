@@ -1,10 +1,14 @@
 from fastapi import FastAPI, Depends, UploadFile, File, HTTPException, status, Body
 from sqlalchemy.orm import Session
+from database import SessionLocal, engine, Base, Document, DocumentSchema, Entity, EntitySchema 
 from pathlib import Path
 import os
 import httpx
 from datetime import datetime
 from PyPDF2 import PdfReader
+import spacy 
+import json  # Ensure json is imported
+from typing import Optional  # Ensure Optional is imported if not already
 
 # NEW: Import Google Generative AI client
 import google.generativeai as genai
@@ -82,6 +86,18 @@ async def test_db_connection(db: Session = Depends(get_db)):
             detail=f"Database connection failed: {e}"
         )
 
+@app.get("/api/documents/{document_id}/entities", response_model=list[EntitySchema]) # Return list of EntitySchema
+async def get_document_entities(document_id: int, db: Session = Depends(get_db)):
+    """
+    Endpoint to retrieve extracted entities for a specific document.
+    """
+    document = db.query(Document).filter(Document.id == document_id).first()
+    if not document:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    entities = db.query(Entity).filter(Entity.document_id == document_id).all()
+    return entities    
+
 @app.get("/api/documents/", response_model=list[DocumentSchema])
 async def get_documents(db: Session = Depends(get_db)):
     documents = db.query(Document).all()
@@ -105,7 +121,7 @@ async def upload_document(
 
     # Define paths for the uploaded PDF and the extracted text file
     pdf_file_location = UPLOAD_DIR / file.filename
-    text_file_location = UPLOAD_DIR / f"{Path(file.filename).stem}.txt" # e.g., "document.pdf" -> "document.txt"
+    text_file_location = UPLOAD_DIR / f"{Path(file.filename).stem}.txt"  # e.g., "document.pdf" -> "document.txt"
 
     # Save the uploaded PDF file to disk
     try:
@@ -140,15 +156,54 @@ async def upload_document(
             detail=f"Failed to extract text from PDF: {e}. Please ensure the PDF is not password-protected or corrupted."
         )
 
-    # Save document metadata to the database
+    # --- NEW: Extract and Save Entities ---
+    extracted_entities_data = []
+    try:
+        if extracted_text:  # Only run NER if text was successfully extracted
+            extracted_entities_data = extract_entities_with_spacy(extracted_text)
+    except Exception as e:
+        print(f"Warning: Failed to extract entities for {file.filename}: {e}")
+
+    # --- NEW: Generate Embeddings ---
+    document_embeddings = None
+    if extracted_text:
+        try:
+            embedding_model = "models/embedding-001"
+            response = genai.embed_content(
+                model=embedding_model,
+                content=extracted_text,
+                task_type="RETRIEVAL_DOCUMENT"
+            )
+            document_embeddings = response['embedding']  # This is a list of floats
+            embeddings_json_string = json.dumps(document_embeddings)
+        except Exception as e:
+            print(f"Warning: Failed to generate embeddings for {file.filename}: {e}")
+            embeddings_json_string = None
+    else:
+        embeddings_json_string = None
+
+    # Save document metadata, entities, and embeddings to the database
     try:
         db_document = Document(
             filename=file.filename,
             upload_date=datetime.utcnow(),
             status="processed_text",
-            path_to_text=str(text_file_location)
+            path_to_text=str(text_file_location),
+            embeddings=embeddings_json_string  # NEW: Save the embedding string
         )
         db.add(db_document)
+
+        # Create Entity objects and link them to the document
+        for entity_data in extracted_entities_data:
+            db_entity = Entity(
+                document=db_document,
+                text=entity_data["text"],
+                label=entity_data["label"],
+                start_char=entity_data["start_char"],
+                end_char=entity_data["end_char"]
+            )
+            db.add(db_entity)
+
         db.commit()
         db.refresh(db_document)
 
@@ -156,7 +211,8 @@ async def upload_document(
             "filename": db_document.filename,
             "text_location": db_document.path_to_text,
             "id": db_document.id,
-            "message": "PDF uploaded, text extracted, and metadata saved successfully!"
+            "embeddings_saved": bool(document_embeddings),
+            "message": "PDF uploaded, text, entities & embeddings extracted, metadata saved successfully!"
         }
     except Exception as e:
         db.rollback()
@@ -167,7 +223,7 @@ async def upload_document(
             os.remove(text_file_location)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to save metadata to DB: {e}. Files were cleaned up."
+            detail=f"Failed to save metadata or embeddings to DB: {e}. Files were cleaned up."
         )
 
 # --- MODIFIED: summarize_text to use Google Gemini ---
@@ -291,3 +347,77 @@ async def get_document_text(document_id: int, db: Session = Depends(get_db)):
         return text_content
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Could not read text file for document ID {document_id}: {e}")
+
+@app.post("/api/test-ner/")
+async def test_ner(text: str = Body(..., embed=True)):
+    entities = extract_entities_with_spacy(text)
+    return {"text": text, "entities": entities}    
+
+# This loads the model once when the app starts, improving performance.
+try:
+    nlp = spacy.load("en_core_web_sm")
+except OSError:
+    print("Downloading SpaCy model 'en_core_web_sm'...")
+    import spacy.cli
+    spacy.cli.download("en_core_web_sm")
+    nlp = spacy.load("en_core_web_sm")
+
+# NEW: Function to extract entities using SpaCy
+def extract_entities_with_spacy(text: str):
+    doc = nlp(text)
+    entities = []
+    for ent in doc.ents:
+        entities.append({
+            "text": ent.text,
+            "label": ent.label_,  # e.g., ORG, GPE, DATE, PERSON
+            "start_char": ent.start_char,
+            "end_char": ent.end_char
+        })
+    return entities
+
+@app.get("/api/search/semantic/", response_model=list[DocumentSchema])
+async def semantic_search(query: str, db: Session = Depends(get_db)):
+    """
+    Performs a semantic search on documents based on the query's meaning.
+    """
+    if not query:
+        raise HTTPException(status_code=400, detail="Search query cannot be empty.")
+
+    query_embedding = None
+    try:
+        # Use the same embedding model as for documents
+        embedding_model = "models/embedding-001"
+        response = genai.embed_content(
+            model=embedding_model,
+            content=query,
+            task_type="RETRIEVAL_QUERY"  # Specify task type for query embeddings
+        )
+        query_embedding = response['embedding']
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to generate query embedding: {e}")
+
+    # Fetch all documents with embeddings
+    all_documents = db.query(Document).filter(Document.embeddings.isnot(None)).all()
+
+    results = []
+    for doc in all_documents:
+        try:
+            doc_embedding = json.loads(doc.embeddings)  # Convert stored JSON string back to list of floats
+
+            # Calculate Cosine Similarity
+            dot_product = sum(a * b for a, b in zip(query_embedding, doc_embedding))
+            query_norm = sum(a * a for a in query_embedding) ** 0.5
+            doc_norm = sum(b * b for b in doc_embedding) ** 0.5
+            similarity = dot_product / (query_norm * doc_norm) if (query_norm * doc_norm) != 0 else 0
+
+            results.append({"document": doc, "similarity": similarity})
+        except Exception as e:
+            print(f"Warning: Could not process embedding for document ID {doc.id}: {e}")
+            # Skip documents with invalid embeddings
+
+    # Sort results by similarity in descending order
+    results.sort(key=lambda x: x["similarity"], reverse=True)
+
+    # Return only the document objects, preserving the original schema
+    return [doc_res["document"] for doc_res in results]
+
