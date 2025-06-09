@@ -1,15 +1,16 @@
 from fastapi import FastAPI, Depends, UploadFile, File, HTTPException, status, Body
 from sqlalchemy.orm import Session
-from database import SessionLocal, engine, Base, Document, DocumentSchema, Entity, EntitySchema 
+from database import SessionLocal, engine, Base, Document, DocumentSchema, Entity, EntitySchema
 from pathlib import Path
 import os
 import httpx
 from datetime import datetime
-from PyPDF2 import PdfReader
+from pdfminer.high_level import extract_text as pdfminer_extract_text
 import spacy
 import json
-from rapidfuzz import process, fuzz  # NEW: Import rapidfuzz
+from rapidfuzz import process, fuzz
 from typing import Optional
+import re # Add this at the top with your other imports
 
 # NEW: Import Google Generative AI client
 import google.generativeai as genai
@@ -30,12 +31,12 @@ Base.metadata.create_all(bind=engine)
 
 # --- SpaCy Initialization (move here) ---
 try:
-    nlp = spacy.load("en_core_web_sm")
+    nlp = spacy.load("en_core_web_md") # UPGRADED: Use medium model for better NER
 except OSError:
-    print("Downloading SpaCy model 'en_core_web_sm'...")
+    print("Downloading SpaCy model 'en_core_web_md'...")
     import spacy.cli
-    spacy.cli.download("en_core_web_sm")
-    nlp = spacy.load("en_core_web_sm")
+    spacy.cli.download("en_core_web_md")
+    nlp = spacy.load("en_core_web_md")
 
 # --- Function to extract entities using SpaCy (move here) ---
 def extract_entities_with_spacy(text: str):
@@ -44,11 +45,66 @@ def extract_entities_with_spacy(text: str):
     for ent in doc.ents:
         entities.append({
             "text": ent.text,
-            "label": ent.label_,
+            "label": ent.label_, # e.g., ORG, GPE, DATE, PERSON
             "start_char": ent.start_char,
             "end_char": ent.end_char
         })
     return entities
+
+# --- NEW: Post-process SpaCy entities for compliance domain ---
+def post_process_spacy_entities(entities: list):
+    processed_entities = []
+    for ent in entities:
+        text = ent["text"]
+        label = ent["label"]
+
+        print(f"DEBUG_POST: Processing entity: '{text[:80]}...' (Initial Label: {label})")
+        original_label = label
+
+        # --- ALWAYS PRINT repr(text) and string comparison results ---
+        print(f"DEBUG_ULTRA: repr(text): {repr(text)}")
+        print(f"DEBUG_ULTRA: 'Access Control' in text: {('Access Control' in text)}")
+        print(f"DEBUG_ULTRA: 'Section' in text: {('Section' in text)}")
+        print(f"DEBUG_ULTRA: Combined condition: {('Access Control' in text and 'Section' in text)}")
+
+        # --- NEW HIGH-PRIORITY, DIRECT RULE ---
+        if "Access Control" in text and "Section" in text:
+            label = "LAW"
+            print(f"DEBUG_ULTRA: Label *should have* changed to LAW for '{text[:80]}...'")
+        # --- END NEW RULE ---
+        
+        # RULE 1 (now elif): Classify general 'Section' or 'Policy' headers as LAW
+        elif re.match(r'^(Section|Policy)\s+(\d+(\.\d+)*)?\s*[-:]?\s*.*', text, re.IGNORECASE):
+            label = "LAW"
+        # RULE 2 (now elif): Correct common miscategorizations for well-known compliance terms
+        elif text.upper() in ["GDPR", "CCPA", "HIPAA", "SOX"]:
+            label = "LAW"
+        # RULE 3 (now elif): Catch other specific miscategorizations as LAW if they are ORG and contain compliance keywords
+        elif label == "ORG" and any(keyword in text for keyword in ["Data Collection", "Access Control", "Incident Response Procedures", "Compliance and Audit"]):
+            label = "LAW"
+        # RULE 4 (now elif): General corrections for entities that are clearly not ORG/PERSON/LOC etc.
+        elif label == "ORG" and "Public Data" in text:
+            label = "MISC"
+        elif label == "ORG" and "MFA" in text:
+            label = "MISC"
+        elif label == "WORK_OF_ART" and "Confidential" in text:
+            label = "MISC"
+
+        # Add more rules as you observe consistent miscategorizations specific to your documents
+
+        # NEW DEBUG PRINT: After processing rules
+        if original_label != label:
+            print(f"DEBUG_POST:   Label changed from {original_label} to {label} for '{text[:80]}...'")
+        else:
+            print(f"DEBUG_POST:   Label remains {label} for '{text[:80]}...'")
+
+        processed_entities.append({
+            "text": text,
+            "label": label,
+            "start_char": ent["start_char"],
+            "end_char": ent["end_char"]
+        })
+    return processed_entities
 
 app = FastAPI()
 
@@ -119,7 +175,7 @@ async def get_document_entities(document_id: int, db: Session = Depends(get_db))
         raise HTTPException(status_code=404, detail="Document not found")
 
     entities = db.query(Entity).filter(Entity.document_id == document_id).all()
-    return entities    
+    return entities
 
 @app.get("/api/documents/", response_model=list[DocumentSchema])
 async def get_documents(db: Session = Depends(get_db)):
@@ -157,14 +213,18 @@ async def upload_document(
             detail=f"Failed to save PDF file: {e}"
         )
 
-    # Extract text from PDF
+    # --- MODIFIED: Extract text from PDF using pdfminer.six ---
     extracted_text = ""
     try:
-        with open(pdf_file_location, 'rb') as pdf_file:
-            pdf_reader = PdfReader(pdf_file)
-            for page_num in range(len(pdf_reader.pages)):
-                page = pdf_reader.pages[page_num]
-                extracted_text += page.extract_text() or ""
+        # Use pdfminer_extract_text directly
+        extracted_text = pdfminer_extract_text(str(pdf_file_location))
+
+        # --- MORE ROBUST TEXT CLEANING (using regex) ---
+        # Replace all whitespace sequences (including newlines, tabs) with a single space
+        extracted_text = re.sub(r'\s+', ' ', extracted_text).strip()
+
+        # NEW PRINT: Inspect the cleaned text before SpaCy/Gemini
+        print(f"DEBUG: Cleaned Extracted Text (first 500 chars):\n{extracted_text[:500]}...\n---End Cleaned Text---")
 
         # Save the extracted text to a .txt file
         with open(text_file_location, "w", encoding="utf-8") as text_file:
@@ -175,7 +235,7 @@ async def upload_document(
             os.remove(pdf_file_location)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to extract text from PDF: {e}. Please ensure the PDF is not password-protected or corrupted."
+            detail=f"Failed to extract text from PDF using pdfminer.six: {e}. Please ensure the PDF is not password-protected or corrupted."
         )
 
     # --- Identify Compliance Clauses using Gemini ---
@@ -201,7 +261,7 @@ async def upload_document(
 
             if clauses_raw_text and clauses_raw_text.lower() != "none":
                 clauses_list = [c.strip() for c in clauses_raw_text.split('\n') if c.strip().startswith('- ')]
-                print(f"DEBUG: Parsed clauses_list: {clauses_list}")  # Debug print
+                print(f"DEBUG: Parsed clauses_list: {clauses_list}") # Debug print
 
                 for clause_text in clauses_list:
                     clean_clause_text = clause_text[2:].strip()
@@ -215,11 +275,11 @@ async def upload_document(
                     identified_clauses_data.append({
                         "text": clean_clause_text,
                         "label": "COMPLIANCE_CLAUSE",
-                        "start_char": start,  # Always -1 for Gemini clauses
-                        "end_char": end       # Always -1 for Gemini clauses
+                        "start_char": start,
+                        "end_char": end
                     })
 
-                print(f"DEBUG: identified_clauses_data after loop: {identified_clauses_data}")
+                print(f"DEBUG: identified_clauses_data after loop: {identified_clauses_data}") # Keep this debug print
 
         except Exception as e:
             print(f"Warning: Failed to identify compliance clauses for {file.filename} with Gemini: {e}")
@@ -230,6 +290,12 @@ async def upload_document(
     try:
         if extracted_text:
             extracted_entities_data_spacy = extract_entities_with_spacy(extracted_text)
+            # Post-process SpaCy entities (this line should already be here)
+            extracted_entities_data_spacy = post_process_spacy_entities(extracted_entities_data_spacy)
+
+        # MOVED PRINT: Now inspect SpaCy's entities AFTER post-processing
+        print(f"DEBUG: SpaCy Extracted Entities (Post-Processed):\n{extracted_entities_data_spacy}\n---End SpaCy Entities---")
+
     except Exception as e:
         print(f"Warning: Failed to extract SpaCy entities for {file.filename}: {e}")
         extracted_entities_data_spacy = []
@@ -430,64 +496,4 @@ async def get_document_text(document_id: int, db: Session = Depends(get_db)):
 @app.post("/api/test-ner/")
 async def test_ner(text: str = Body(..., embed=True)):
     entities = extract_entities_with_spacy(text)
-    return {"text": text, "entities": entities}    
-
-# --- NEW: Function to extract entities using SpaCy
-def extract_entities_with_spacy(text: str):
-    doc = nlp(text)
-    entities = []
-    for ent in doc.ents:
-        entities.append({
-            "text": ent.text,
-            "label": ent.label_,  # e.g., ORG, GPE, DATE, PERSON
-            "start_char": ent.start_char,
-            "end_char": ent.end_char
-        })
-    return entities
-
-@app.get("/api/search/semantic/", response_model=list[DocumentSchema])
-async def semantic_search(query: str, db: Session = Depends(get_db)):
-    """
-    Performs a semantic search on documents based on the query's meaning.
-    """
-    if not query:
-        raise HTTPException(status_code=400, detail="Search query cannot be empty.")
-
-    query_embedding = None
-    try:
-        # Use the same embedding model as for documents
-        embedding_model = "models/embedding-001"
-        response = genai.embed_content(
-            model=embedding_model,
-            content=query,
-            task_type="RETRIEVAL_QUERY"  # Specify task type for query embeddings
-        )
-        query_embedding = response['embedding']
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to generate query embedding: {e}")
-
-    # Fetch all documents with embeddings
-    all_documents = db.query(Document).filter(Document.embeddings.isnot(None)).all()
-
-    results = []
-    for doc in all_documents:
-        try:
-            doc_embedding = json.loads(doc.embeddings)  # Convert stored JSON string back to list of floats
-
-            # Calculate Cosine Similarity
-            dot_product = sum(a * b for a, b in zip(query_embedding, doc_embedding))
-            query_norm = sum(a * a for a in query_embedding) ** 0.5
-            doc_norm = sum(b * b for b in doc_embedding) ** 0.5
-            similarity = dot_product / (query_norm * doc_norm) if (query_norm * doc_norm) != 0 else 0
-
-            results.append({"document": doc, "similarity": similarity})
-        except Exception as e:
-            print(f"Warning: Could not process embedding for document ID {doc.id}: {e}")
-            # Skip documents with invalid embeddings
-
-    # Sort results by similarity in descending order
-    results.sort(key=lambda x: x["similarity"], reverse=True)
-
-    # Return only the document objects, preserving the original schema
-    return [doc_res["document"] for doc_res in results]
-
+    return {"text": text, "entities": entities}

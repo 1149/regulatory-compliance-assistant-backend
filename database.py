@@ -40,7 +40,7 @@ class Entity(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     document_id = Column(Integer, ForeignKey("documents.id"), index=True)  # Link to Document
-    text = Column(String)  # The actual entity text (e.g., "GDPR")
+    text = Column(Text)  # MODIFIED: Use Text for arbitrary length strings
     label = Column(String)  # The type of entity (e.g., "ORG", "DATE", "LAW")
     start_char = Column(Integer)  # Starting character index in the original text
     end_char = Column(Integer)  # Ending character index in the original text
