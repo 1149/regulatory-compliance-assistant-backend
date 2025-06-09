@@ -6,9 +6,10 @@ import os
 import httpx
 from datetime import datetime
 from PyPDF2 import PdfReader
-import spacy 
-import json  # Ensure json is imported
-from typing import Optional  # Ensure Optional is imported if not already
+import spacy
+import json
+from rapidfuzz import process, fuzz  # NEW: Import rapidfuzz
+from typing import Optional
 
 # NEW: Import Google Generative AI client
 import google.generativeai as genai
@@ -26,6 +27,28 @@ from dotenv import load_dotenv
 load_dotenv()
 
 Base.metadata.create_all(bind=engine)
+
+# --- SpaCy Initialization (move here) ---
+try:
+    nlp = spacy.load("en_core_web_sm")
+except OSError:
+    print("Downloading SpaCy model 'en_core_web_sm'...")
+    import spacy.cli
+    spacy.cli.download("en_core_web_sm")
+    nlp = spacy.load("en_core_web_sm")
+
+# --- Function to extract entities using SpaCy (move here) ---
+def extract_entities_with_spacy(text: str):
+    doc = nlp(text)
+    entities = []
+    for ent in doc.ents:
+        entities.append({
+            "text": ent.text,
+            "label": ent.label_,
+            "start_char": ent.start_char,
+            "end_char": ent.end_char
+        })
+    return entities
 
 app = FastAPI()
 
@@ -121,7 +144,7 @@ async def upload_document(
 
     # Define paths for the uploaded PDF and the extracted text file
     pdf_file_location = UPLOAD_DIR / file.filename
-    text_file_location = UPLOAD_DIR / f"{Path(file.filename).stem}.txt"  # e.g., "document.pdf" -> "document.txt"
+    text_file_location = UPLOAD_DIR / f"{Path(file.filename).stem}.txt"
 
     # Save the uploaded PDF file to disk
     try:
@@ -148,7 +171,6 @@ async def upload_document(
             text_file.write(extracted_text)
 
     except Exception as e:
-        # If text extraction fails, attempt to delete the PDF and rollback DB transaction if it started
         if pdf_file_location.exists():
             os.remove(pdf_file_location)
         raise HTTPException(
@@ -156,15 +178,63 @@ async def upload_document(
             detail=f"Failed to extract text from PDF: {e}. Please ensure the PDF is not password-protected or corrupted."
         )
 
-    # --- NEW: Extract and Save Entities ---
-    extracted_entities_data = []
-    try:
-        if extracted_text:  # Only run NER if text was successfully extracted
-            extracted_entities_data = extract_entities_with_spacy(extracted_text)
-    except Exception as e:
-        print(f"Warning: Failed to extract entities for {file.filename}: {e}")
+    # --- Identify Compliance Clauses using Gemini ---
+    identified_clauses_data = []
+    if extracted_text:
+        try:
+            model = genai.GenerativeModel(GEMINI_MODEL_NAME)
+            clause_prompt = f"""
+            From the following document, identify and list any distinct paragraphs or sentences that appear to be specific regulatory clauses, policies, or compliance rules.
+            List each identified clause on a new line, prefixed with "- ".
+            If no such clauses are clearly identifiable, respond with "None".
 
-    # --- NEW: Generate Embeddings ---
+            Document:
+            {extracted_text}
+            """
+            response = model.generate_content(
+                clause_prompt,
+                generation_config=genai.types.GenerationConfig(max_output_tokens=1000)
+            )
+            
+            clauses_raw_text = response.text.strip()
+            print(f"Gemini raw clause response for {file.filename}:\n{clauses_raw_text}\n---")
+
+            if clauses_raw_text and clauses_raw_text.lower() != "none":
+                clauses_list = [c.strip() for c in clauses_raw_text.split('\n') if c.strip().startswith('- ')]
+                print(f"DEBUG: Parsed clauses_list: {clauses_list}")  # Debug print
+
+                for clause_text in clauses_list:
+                    clean_clause_text = clause_text[2:].strip()
+
+                    # --- REPLACEMENT: Always save clause, bypass fuzzy matching ---
+                    start = -1
+                    end = -1
+                    print(f"DEBUG: Saving clause '{clean_clause_text[:50]}...' with start/end -1 (bypassing fuzzy match error)")
+                    # --- END OF REPLACEMENT ---
+
+                    identified_clauses_data.append({
+                        "text": clean_clause_text,
+                        "label": "COMPLIANCE_CLAUSE",
+                        "start_char": start,  # Always -1 for Gemini clauses
+                        "end_char": end       # Always -1 for Gemini clauses
+                    })
+
+                print(f"DEBUG: identified_clauses_data after loop: {identified_clauses_data}")
+
+        except Exception as e:
+            print(f"Warning: Failed to identify compliance clauses for {file.filename} with Gemini: {e}")
+            identified_clauses_data = []
+
+    # --- Extract and Save Entities (SpaCy) ---
+    extracted_entities_data_spacy = []
+    try:
+        if extracted_text:
+            extracted_entities_data_spacy = extract_entities_with_spacy(extracted_text)
+    except Exception as e:
+        print(f"Warning: Failed to extract SpaCy entities for {file.filename}: {e}")
+        extracted_entities_data_spacy = []
+
+    # --- Generate Embeddings ---
     document_embeddings = None
     if extracted_text:
         try:
@@ -174,7 +244,7 @@ async def upload_document(
                 content=extracted_text,
                 task_type="RETRIEVAL_DOCUMENT"
             )
-            document_embeddings = response['embedding']  # This is a list of floats
+            document_embeddings = response['embedding']
             embeddings_json_string = json.dumps(document_embeddings)
         except Exception as e:
             print(f"Warning: Failed to generate embeddings for {file.filename}: {e}")
@@ -182,19 +252,28 @@ async def upload_document(
     else:
         embeddings_json_string = None
 
-    # Save document metadata, entities, and embeddings to the database
+    # Save document metadata, entities, and clauses to the database
     try:
         db_document = Document(
             filename=file.filename,
             upload_date=datetime.utcnow(),
             status="processed_text",
             path_to_text=str(text_file_location),
-            embeddings=embeddings_json_string  # NEW: Save the embedding string
+            embeddings=embeddings_json_string
         )
         db.add(db_document)
 
-        # Create Entity objects and link them to the document
-        for entity_data in extracted_entities_data:
+        # Combine SpaCy entities and identified clauses
+        all_entities_to_save = extracted_entities_data_spacy + identified_clauses_data
+
+        for entity_data in all_entities_to_save:
+            # Debug print to see what is being saved
+            print("Saving entity:", entity_data)
+            # Skip entities with invalid char positions
+            # if entity_data["start_char"] == -1 or entity_data["end_char"] == -1:
+            #     print(f"Skipping entity with invalid char positions: {entity_data}")
+            #     continue
+            # Optionally, check text length here if your DB column is limited
             db_entity = Entity(
                 document=db_document,
                 text=entity_data["text"],
@@ -212,18 +291,18 @@ async def upload_document(
             "text_location": db_document.path_to_text,
             "id": db_document.id,
             "embeddings_saved": bool(document_embeddings),
-            "message": "PDF uploaded, text, entities & embeddings extracted, metadata saved successfully!"
+            "entities_identified": len(all_entities_to_save),
+            "message": "PDF uploaded, text, entities & clauses extracted, metadata saved successfully!"
         }
     except Exception as e:
         db.rollback()
-        # Clean up files if DB transaction fails
         if pdf_file_location.exists():
             os.remove(pdf_file_location)
         if text_file_location.exists():
             os.remove(text_file_location)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to save metadata or embeddings to DB: {e}. Files were cleaned up."
+            detail=f"Failed to save metadata or entities/clauses to DB: {e}. Files were cleaned up."
         )
 
 # --- MODIFIED: summarize_text to use Google Gemini ---
@@ -353,16 +432,7 @@ async def test_ner(text: str = Body(..., embed=True)):
     entities = extract_entities_with_spacy(text)
     return {"text": text, "entities": entities}    
 
-# This loads the model once when the app starts, improving performance.
-try:
-    nlp = spacy.load("en_core_web_sm")
-except OSError:
-    print("Downloading SpaCy model 'en_core_web_sm'...")
-    import spacy.cli
-    spacy.cli.download("en_core_web_sm")
-    nlp = spacy.load("en_core_web_sm")
-
-# NEW: Function to extract entities using SpaCy
+# --- NEW: Function to extract entities using SpaCy
 def extract_entities_with_spacy(text: str):
     doc = nlp(text)
     entities = []
