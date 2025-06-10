@@ -27,6 +27,7 @@ from dotenv import load_dotenv
 # Load environment variables from .env file at the very top level
 load_dotenv()
 
+
 Base.metadata.create_all(bind=engine)
 
 # --- SpaCy Initialization (move here) ---
@@ -497,3 +498,17 @@ async def get_document_text(document_id: int, db: Session = Depends(get_db)):
 async def test_ner(text: str = Body(..., embed=True)):
     entities = extract_entities_with_spacy(text)
     return {"text": text, "entities": entities}
+
+@app.post("/api/document/{document_id}/qa/")
+async def document_qa(document_id: int, query: str = Body(..., embed=True), db: Session = Depends(get_db)):
+    """
+    AI Chatbot endpoint for Question-Answering over a specific document (RAG).
+    For now, returns a placeholder.
+    """
+    document = db.query(Document).filter(Document.id == document_id).first()
+    if not document:
+        raise HTTPException(status_code=404, detail="Document not found.")
+
+    # For now, just return a placeholder response
+    placeholder_answer = f"Hello! You asked about document ID {document_id}: '{query}'. I will generate an answer for you soon!"
+    return {"answer": placeholder_answer}
