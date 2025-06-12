@@ -11,6 +11,7 @@ import json
 from rapidfuzz import process, fuzz
 from typing import Optional
 import re # Add this at the top with your other imports
+import unicodedata  # Add this at the top with your other imports
 
 # NEW: Import Google Generative AI client
 import google.generativeai as genai
@@ -52,6 +53,53 @@ def extract_entities_with_spacy(text: str):
         })
     return entities
 
+# --- RAG Chunking Configuration (keep these)
+CHUNK_SIZE = 500  # Number of characters per chunk
+CHUNK_OVERLAP = 100 # Number of characters to overlap between chunks
+# Ensure nlp (SpaCy model) is loaded globally before this function as you have it
+
+def get_text_chunks(text: str):
+    """
+    Splits text into overlapping chunks using a sliding window approach
+    to ensure context is not lost at chunk boundaries.
+    """
+    if not text:
+        return []
+
+    # Use a robust text splitter logic. This is more effective than simple sentence splitting for RAG.
+    # We will still use the global CHUNK_SIZE and CHUNK_OVERLAP constants.
+    
+    # First, let's do a basic sentence-aware join to clean up the text from pdfminer
+    doc = nlp(text)
+    sentences = [sent.text.strip() for sent in doc.sents if sent.text.strip()]
+    full_text = " ".join(sentences)
+
+    chunks = []
+    start_index = 0
+    # Slide a window across the text
+    while start_index < len(full_text):
+        end_index = start_index + CHUNK_SIZE
+        chunk = full_text[start_index:end_index]
+        chunks.append(chunk)
+        
+        # The next window starts `overlap` characters back from the end of the current chunk
+        next_start = start_index + CHUNK_SIZE - CHUNK_OVERLAP
+        
+        # If the next start position is the same as the current one, it means the step is too small.
+        # To prevent an infinite loop, we must advance the start index by at least one character.
+        if next_start <= start_index:
+            start_index += 1
+        else:
+            start_index = next_start
+
+    print(f"DEBUG_CHUNKING: Created {len(chunks)} chunks with size {CHUNK_SIZE} and overlap {CHUNK_OVERLAP}.")
+    for idx, c in enumerate(chunks[:5]):  # Print first 5 chunks
+        print(f"DEBUG_CHUNKING: Chunk {idx}: '{c[:100]}...'")
+        
+    return chunks
+
+# You'll use this function in your /api/document/{document_id}/qa/ endpoint later.
+
 # --- NEW: Post-process SpaCy entities for compliance domain ---
 def post_process_spacy_entities(entities: list):
     processed_entities = []
@@ -62,42 +110,69 @@ def post_process_spacy_entities(entities: list):
         print(f"DEBUG_POST: Processing entity: '{text[:80]}...' (Initial Label: {label})")
         original_label = label
 
-        # --- ALWAYS PRINT repr(text) and string comparison results ---
-        print(f"DEBUG_ULTRA: repr(text): {repr(text)}")
-        print(f"DEBUG_ULTRA: 'Access Control' in text: {('Access Control' in text)}")
-        print(f"DEBUG_ULTRA: 'Section' in text: {('Section' in text)}")
-        print(f"DEBUG_ULTRA: Combined condition: {('Access Control' in text and 'Section' in text)}")
+        # Decision: Do we re-classify ALL entities or just specific types?
+        # For this innovative approach, let's re-classify entities that SpaCy might struggle with
+        # or those that are particularly important (like sections)
 
-        # --- NEW HIGH-PRIORITY, DIRECT RULE ---
-        if "Access Control" in text and "Section" in text:
-            label = "LAW"
-            print(f"DEBUG_ULTRA: Label *should have* changed to LAW for '{text[:80]}...'")
-        # --- END NEW RULE ---
-        
-        # RULE 1 (now elif): Classify general 'Section' or 'Policy' headers as LAW
-        elif re.match(r'^(Section|Policy)\s+(\d+(\.\d+)*)?\s*[-:]?\s*.*', text, re.IGNORECASE):
-            label = "LAW"
-        # RULE 2 (now elif): Correct common miscategorizations for well-known compliance terms
-        elif text.upper() in ["GDPR", "CCPA", "HIPAA", "SOX"]:
-            label = "LAW"
-        # RULE 3 (now elif): Catch other specific miscategorizations as LAW if they are ORG and contain compliance keywords
-        elif label == "ORG" and any(keyword in text for keyword in ["Data Collection", "Access Control", "Incident Response Procedures", "Compliance and Audit"]):
-            label = "LAW"
-        # RULE 4 (now elif): General corrections for entities that are clearly not ORG/PERSON/LOC etc.
-        elif label == "ORG" and "Public Data" in text:
-            label = "MISC"
-        elif label == "ORG" and "MFA" in text:
-            label = "MISC"
-        elif label == "WORK_OF_ART" and "Confidential" in text:
-            label = "MISC"
+        # We will only re-classify certain types of entities to save on API calls and latency
+        # For example, those initially tagged as ORG, or that contain "Section"
+        should_reclassify = False
+        if label in ["ORG", "MISC", "LAW", "FAC", "GPE"] and (
+            "Section" in text or "Policy" in text or "Control" in text or
+            "Procedure" in text or "Requirement" in text or
+            text.upper() in ["GDPR", "CCPA", "HIPAA", "SOX", "MFA"]
+        ):
+            should_reclassify = True
 
-        # Add more rules as you observe consistent miscategorizations specific to your documents
+        # Add specific checks if needed (e.g., if you only want to reclassify 'Section X.X' that SpaCy gets wrong)
+        # For instance: if 'Section' in text and label != 'LAW': should_reclassify = True
 
-        # NEW DEBUG PRINT: After processing rules
+        if should_reclassify:
+            try:
+                gemini_model = genai.GenerativeModel(GEMINI_MODEL_NAME)
+                reclassify_prompt = f"""
+                Given the following text from a policy document, classify it as one of these types: LAW, ORGANIZATION, PERSON, DATE, TIME, LOCATION, MISC, CARDINAL, ORDINAL, or NONE_OF_THE_ABOVE.
+                Focus on the primary meaning in a regulatory compliance context.
+                If it represents a specific rule, policy, section, or regulation, classify it as LAW.
+                Respond with only the chosen label.
+
+                Text: "{text}"
+                """
+                response = gemini_model.generate_content(
+                    reclassify_prompt,
+                    generation_config=genai.types.GenerationConfig(max_output_tokens=10) # Keep response short
+                )
+
+                new_label_raw = response.text.strip().upper()
+                # Basic validation for Gemini's response
+                if new_label_raw in ["LAW", "ORGANIZATION", "PERSON", "DATE", "TIME", "LOCATION", "MISC", "CARDINAL", "ORDINAL"]:
+                    # Map ORGANIZATION -> ORG, LOCATION -> GPE
+                    if new_label_raw == "ORGANIZATION":
+                        new_label = "ORG"
+                    elif new_label_raw == "LOCATION":
+                        new_label = "GPE"
+                    else:
+                        new_label = new_label_raw # Use directly if it matches SpaCy's labels or our custom ones
+
+                    label = new_label
+                    print(f"DEBUG_POST:   LLM changed label from {original_label} to {label} for '{text[:80]}...'")
+                else:
+                    print(f"DEBUG_POST:   LLM returned unmappable label '{new_label_raw}'. Label remains {original_label} for '{text[:80]}...'")
+
+            except Exception as e:
+                print(f"Warning: Failed to reclassify entity '{text[:80]}...' with Gemini: {e}")
+                # Keep original label if reclassification fails
+
+        if not should_reclassify or original_label == label:
+            # Apply your previous rule-based corrections for specific cases if you want a fallback
+            # This is where your previous re.match, text.upper() in [], etc. rules would go
+            # For now, let's see how much Gemini handles.
+            pass # Gemini should handle what we're targeting now.
+
         if original_label != label:
-            print(f"DEBUG_POST:   Label changed from {original_label} to {label} for '{text[:80]}...'")
+            print(f"DEBUG_POST:   Final Label changed from {original_label} to {label} for '{text[:80]}...'")
         else:
-            print(f"DEBUG_POST:   Label remains {label} for '{text[:80]}...'")
+            print(f"DEBUG_POST:   Final Label remains {label} for '{text[:80]}...'")
 
         processed_entities.append({
             "text": text,
@@ -220,12 +295,32 @@ async def upload_document(
         # Use pdfminer_extract_text directly
         extracted_text = pdfminer_extract_text(str(pdf_file_location))
 
-        # --- MORE ROBUST TEXT CLEANING (using regex) ---
-        # Replace all whitespace sequences (including newlines, tabs) with a single space
-        extracted_text = re.sub(r'\s+', ' ', extracted_text).strip()
+        # --- Start of Replacement Block ---
+        # 1. Replace sequences of two or more newlines with a double newline (a standard paragraph break).
+        extracted_text = re.sub(r'\n\s*\n', '\n\n', extracted_text)
 
-        # NEW PRINT: Inspect the cleaned text before SpaCy/Gemini
-        print(f"DEBUG: Cleaned Extracted Text (first 500 chars):\n{extracted_text[:500]}...\n---End Cleaned Text---")
+        # 2. Replace single newlines that are likely just line wraps within a sentence with a space.
+        # This looks for a lowercase letter, a newline, and another lowercase letter.
+        extracted_text = re.sub(r'([a-z])\n([a-z])', r'\1 \2', extracted_text)
+
+        # 3. Replace multiple spaces with a single space to clean up the text.
+        extracted_text = re.sub(r' +', ' ', extracted_text)
+
+        # 4. Strip any leading/trailing whitespace from the final text.
+        extracted_text = extracted_text.strip()
+        # --- End of Replacement Block ---
+
+        # --- MORE ROBUST TEXT CLEANING (for perfect flatness and alignment) ---
+        # 1. Normalize Unicode characters (e.g., composite characters to single ones)
+        extracted_text = unicodedata.normalize("NFKC", extracted_text)
+        # 2. Replace all types of newlines and carriage returns with a single space
+        extracted_text = extracted_text.replace('\r\n', ' ').replace('\n', ' ').replace('\r', ' ')
+        # 3. Replace any sequence of whitespace (including multiple spaces) with a single space and strip leading/trailing
+        extracted_text = re.sub(r'\s+', ' ', extracted_text).strip()
+        # --- End of Robust Cleaning ---
+
+        # NEW PRINT: Inspect the final cleaned text before SpaCy/Gemini
+        print(f"DEBUG: Final Cleaned Extracted Text (first 500 chars):\n{extracted_text[:500]}...\n---End Final Cleaned Text---")
 
         # Save the extracted text to a .txt file
         with open(text_file_location, "w", encoding="utf-8") as text_file:
@@ -503,12 +598,173 @@ async def test_ner(text: str = Body(..., embed=True)):
 async def document_qa(document_id: int, query: str = Body(..., embed=True), db: Session = Depends(get_db)):
     """
     AI Chatbot endpoint for Question-Answering over a specific document (RAG).
-    For now, returns a placeholder.
     """
+    # --- NEW: Add this block for conversational greetings ---
+    normalized_query = query.strip().lower()
+    greetings = [
+        "hi", "hello", "hey", "greetings", 
+        "good morning", "good afternoon", "good evening"
+    ]
+
+    if normalized_query in greetings:
+        return {"answer": "Hello! How can I assist you with this document today?"}
+    # --- End of new block ---
+
+    # The existing RAG logic continues below
     document = db.query(Document).filter(Document.id == document_id).first()
     if not document:
         raise HTTPException(status_code=404, detail="Document not found.")
 
-    # For now, just return a placeholder response
-    placeholder_answer = f"Hello! You asked about document ID {document_id}: '{query}'. I will generate an answer for you soon!"
-    return {"answer": placeholder_answer}
+    # --- Retrieval Part ---
+    full_document_text = ""
+    try:
+        with open(document.path_to_text, "r", encoding="utf-8") as f:
+            full_document_text = f.read()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Could not read document text file: {e}")
+
+    # 1. Chunk the document
+    document_chunks = get_text_chunks(full_document_text)
+    print(f"DEBUG_RAG: Query: '{query}'")
+    print(f"DEBUG_RAG: Document has {len(document_chunks)} chunks.")
+
+    if not document_chunks:
+        return {"answer": "I couldn't process the document content to find relevant chunks."}
+
+    # 2. Generate embedding for the user's query
+    query_embedding_vector = None
+    try:
+        query_embedding_model = "models/embedding-001"
+        query_embedding_response = genai.embed_content(
+            model=query_embedding_model,
+            content=query,
+            task_type="RETRIEVAL_QUERY"
+        )
+        query_embedding_vector = query_embedding_response['embedding']
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to generate query embedding: {e}")
+
+    # 3. Generate embeddings for each chunk and find most relevant
+    chunk_similarities = []
+    for idx, chunk in enumerate(document_chunks):
+        try:
+            chunk_embedding_response = genai.embed_content(
+                model=query_embedding_model,
+                content=chunk,
+                task_type="RETRIEVAL_DOCUMENT"
+            )
+            chunk_embedding_vector = chunk_embedding_response['embedding']
+
+            dot_product = sum(a * b for a, b in zip(query_embedding_vector, chunk_embedding_vector))
+            query_norm = sum(a*a for a in query_embedding_vector)**0.5
+            chunk_norm = sum(b*b for b in chunk_embedding_vector)**0.5
+
+            similarity = dot_product / (query_norm * chunk_norm) if (query_norm * chunk_norm) != 0 else 0
+
+            chunk_similarities.append({"chunk": chunk, "similarity": similarity, "index": idx})
+
+            # NEW DEBUG: Print each chunk's full text and similarity score
+            print(f"DEBUG_RAG_CHUNK_DETAIL: Chunk {idx} (Score: {similarity:.4f}): '{chunk[:150]}...'")
+
+        except Exception as e:
+            print(f"Warning: Failed to embed or compare chunk {idx}: {e}")
+            # Continue to next chunk if one fails
+
+    # NEW DEBUG: Print all chunk similarities before sorting
+    top5 = [f"Chunk {s['index']} ({s['similarity']:.4f})" for s in sorted(chunk_similarities, key=lambda x: x['similarity'], reverse=True)[:5]]
+    print(f"DEBUG_RAG: All chunk similarities (top 5):\n{top5}")
+    chunk_similarities.sort(key=lambda x: x["similarity"], reverse=True)
+    top_n_chunks = 7  # You can adjust this number
+
+    relevant_chunks = [item["chunk"] for item in chunk_similarities[:top_n_chunks]]
+
+    # NEW DEBUG: Print selected relevant chunks
+    print(f"DEBUG_RAG: Top {top_n_chunks} relevant chunks selected:")
+    for idx, chunk_text in enumerate(relevant_chunks):
+        print(f"DEBUG_RAG:   Chunk {idx+1}: '{chunk_text[:100]}...' (Score: {chunk_similarities[idx]['similarity']:.4f})")
+    print("--- End Relevant Chunks ---")
+
+    if not relevant_chunks:
+        return {"answer": "I couldn't find any highly relevant sections in the document for your question."}
+
+    # --- Generation Part (Gemini RAG) ---
+    try:
+        gemini_model = genai.GenerativeModel(GEMINI_MODEL_NAME)
+
+        # Construct the RAG prompt for Gemini
+        context = "\n\n".join(relevant_chunks)
+
+        rag_prompt = f"""
+        You are a helpful assistant that answers questions based ONLY on the provided document context.
+        If the answer cannot be found in the context, state that clearly and do not make up information.
+
+        Document Context:
+        ---
+        {context}
+        ---
+
+        Question: {query}
+        """
+        # NEW DEBUG: Print the final RAG prompt
+        print(f"DEBUG_RAG: Final RAG Prompt sent to Gemini:\n{rag_prompt[:500]}...\n--- End RAG Prompt ---")
+
+        # Call Gemini API
+        response = gemini_model.generate_content(
+            rag_prompt,
+            generation_config=genai.types.GenerationConfig(max_output_tokens=500)
+        )
+
+        answer = response.text.strip()
+
+        if not answer:
+            return {"answer": "The AI model returned an empty response."}
+
+        return {"answer": answer}
+
+    except InvalidArgument as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Gemini API Invalid Argument for RAG: {e}. Check prompt or content safety guidelines."
+        )
+    except ResourceExhausted:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Gemini API quota exceeded for RAG. Please check your Google Cloud Console usage."
+        )
+    except GoogleAPIError as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Google Gemini API error during RAG generation: {e}"
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"An unexpected error occurred during RAG answer generation: {e}"
+        )
+
+@app.post("/api/test-chunking/")
+async def test_chunking(text: str = Body(..., embed=True)):
+    chunks = get_text_chunks(text)
+    return {"num_chunks": len(chunks), "first_chunks": chunks[:3]}  # Return first 3 chunks
+
+@app.post("/api/analyze-policy/")
+async def analyze_policy(policy_text: str = Body(..., embed=True)):
+    """
+    Endpoint for analyzing user-provided policy text against regulatory clauses.
+    For now, returns a placeholder response.
+    """
+    if not policy_text.strip():
+        raise HTTPException(status_code=400, detail="Policy text cannot be empty for analysis.")
+
+    # In future steps, this is where you'd implement:
+    # 1. Text extraction (already done for docs, here it's direct text input)
+    # 2. Embedding generation for policy_text
+    # 3. Semantic search against COMPLIANCE_CLAUSE entities from your DB
+    # 4. LLM call (Gemini) to draft suggestions based on matches/gaps
+
+    placeholder_response = {
+        "status": "Analysis pending",
+        "message": "Policy received for analysis. AI suggestions will be generated soon!",
+        "received_text_length": len(policy_text)
+    }
+    return placeholder_response
