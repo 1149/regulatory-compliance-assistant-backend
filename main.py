@@ -250,8 +250,19 @@ async def get_document_entities(document_id: int, db: Session = Depends(get_db))
     return entities
 
 @app.get("/api/documents/", response_model=list[DocumentSchema])
-async def get_documents(db: Session = Depends(get_db)):
-    documents = db.query(Document).all()
+async def get_documents(subject: Optional[str] = None, db: Session = Depends(get_db)):
+    """
+    Get all documents, optionally filtered by subject.
+    Returns documents sorted by upload_date (newest first).
+    """
+    query = db.query(Document)
+    
+    # Filter by subject if provided
+    if subject:
+        query = query.filter(Document.subject == subject)
+    
+    # Sort by upload_date (newest first)
+    documents = query.order_by(Document.upload_date.desc()).all()
     return documents
 
 UPLOAD_DIR = Path("uploads")
@@ -978,3 +989,121 @@ async def get_document_pdf(document_id: int, db: Session = Depends(get_db)):
             "Cache-Control": "no-cache"
         }
     )
+
+@app.get("/api/documents/subjects/")
+async def get_unique_subjects(db: Session = Depends(get_db)):
+    """
+    Endpoint to get all unique subjects from documents.
+    """
+    try:
+        # Query unique subjects, excluding null values
+        subjects = db.query(Document.subject).filter(Document.subject.isnot(None)).distinct().all()
+        # Extract the subject strings from the query result tuples
+        unique_subjects = [subject[0] for subject in subjects if subject[0]]
+        return {"subjects": unique_subjects}
+    except Exception as e:
+        print(f"ERROR: Failed to get unique subjects: {e}")
+        raise HTTPException(status_code=500, detail="Failed to retrieve unique subjects")
+
+@app.delete("/api/documents/{document_id}/")
+async def delete_document(document_id: int, db: Session = Depends(get_db)):
+    """
+    Endpoint to permanently delete a document and all associated data.
+    This includes:
+    - Database record removal
+    - Associated entities removal
+    - PDF file deletion
+    - Text file deletion
+    """
+    try:
+        print(f"DEBUG: Starting deletion process for document ID: {document_id}")
+        
+        # Start a database transaction
+        document = db.query(Document).filter(Document.id == document_id).first()
+        if not document:
+            raise HTTPException(status_code=404, detail="Document not found")
+        
+        # Store file paths before deletion
+        text_path = None
+        pdf_path = None
+        
+        if document.path_to_text:
+            text_path = Path(document.path_to_text)
+            
+            # Determine PDF path from text path
+            if text_path.name.endswith('.txt.txt'):
+                # For files like "security_policy_test_03.txt.txt", the original PDF was "security_policy_test_03.txt.pdf"
+                base_name = text_path.name[:-8]  # Remove '.txt.txt'
+                pdf_filename = f"{base_name}.pdf"
+            else:
+                # Normal case: "filename.txt" -> "filename.pdf"
+                pdf_filename = f"{text_path.stem}.pdf"
+            
+            pdf_path = text_path.parent / pdf_filename
+        
+        print(f"DEBUG: Text file path: {text_path}")
+        print(f"DEBUG: PDF file path: {pdf_path}")
+        
+        # Delete associated entities first (foreign key constraint)
+        entities_deleted = db.query(Entity).filter(Entity.document_id == document_id).delete()
+        print(f"DEBUG: Deleted {entities_deleted} associated entities")
+        
+        # Delete the document record
+        db.delete(document)
+        db.commit()
+        print(f"DEBUG: Deleted document record from database")
+        
+        # Delete files from filesystem
+        files_deleted = []
+        files_failed = []
+        
+        # Delete text file
+        if text_path and text_path.exists():
+            try:
+                text_path.unlink()
+                files_deleted.append(str(text_path))
+                print(f"DEBUG: Deleted text file: {text_path}")
+            except Exception as e:
+                files_failed.append(f"text file {text_path}: {str(e)}")
+                print(f"ERROR: Failed to delete text file {text_path}: {e}")
+        elif text_path:
+            print(f"DEBUG: Text file not found (already deleted?): {text_path}")
+        
+        # Delete PDF file
+        if pdf_path and pdf_path.exists():
+            try:
+                pdf_path.unlink()
+                files_deleted.append(str(pdf_path))
+                print(f"DEBUG: Deleted PDF file: {pdf_path}")
+            except Exception as e:
+                files_failed.append(f"PDF file {pdf_path}: {str(e)}")
+                print(f"ERROR: Failed to delete PDF file {pdf_path}: {e}")
+        elif pdf_path:
+            print(f"DEBUG: PDF file not found (already deleted?): {pdf_path}")
+        
+        # Prepare response
+        response = {
+            "message": f"Document {document_id} deleted successfully",
+            "document_id": document_id,
+            "entities_deleted": entities_deleted,
+            "files_deleted": files_deleted
+        }
+        
+        if files_failed:
+            response["files_failed"] = files_failed
+            response["warning"] = "Some files could not be deleted from filesystem"
+        
+        print(f"DEBUG: Deletion completed. Response: {response}")
+        return response
+        
+    except HTTPException:
+        # Re-raise HTTP exceptions (like 404)
+        raise
+    except Exception as e:
+        # Rollback transaction on error
+        db.rollback()
+        print(f"ERROR: Failed to delete document {document_id}: {e}")
+        raise HTTPException(
+            status_code=500, 
+            detail=f"Failed to delete document: {str(e)}"
+        )
