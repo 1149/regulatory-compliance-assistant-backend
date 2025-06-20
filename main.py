@@ -1,4 +1,5 @@
-from fastapi import FastAPI, Depends, UploadFile, File, HTTPException, status, Body
+from fastapi import FastAPI, Depends, UploadFile, File, HTTPException, status, Body, Form
+from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 from database import SessionLocal, engine, Base, Document, DocumentSchema, Entity, EntitySchema
 from pathlib import Path
@@ -90,12 +91,7 @@ def get_text_chunks(text: str):
         if next_start <= start_index:
             start_index += 1
         else:
-            start_index = next_start
-
-    print(f"DEBUG_CHUNKING: Created {len(chunks)} chunks with size {CHUNK_SIZE} and overlap {CHUNK_OVERLAP}.")
-    for idx, c in enumerate(chunks[:5]):  # Print first 5 chunks
-        print(f"DEBUG_CHUNKING: Chunk {idx}: '{c[:100]}...'")
-        
+            start_index = next_start    
     return chunks
 
 # You'll use this function in your /api/document/{document_id}/qa/ endpoint later.
@@ -265,6 +261,7 @@ if not UPLOAD_DIR.exists():
 @app.post("/api/upload-document/")
 async def upload_document(
     file: UploadFile = File(...),
+    subject: str = Form(...),
     db: Session = Depends(get_db)
 ):
     # Added validation for PDF files
@@ -272,11 +269,10 @@ async def upload_document(
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Only PDF files are allowed."
-        )
-
-    # Define paths for the uploaded PDF and the extracted text file
+        )    # Define paths for the uploaded PDF and the extracted text files
     pdf_file_location = UPLOAD_DIR / file.filename
     text_file_location = UPLOAD_DIR / f"{Path(file.filename).stem}.txt"
+    raw_text_file_location = UPLOAD_DIR / f"{Path(file.filename).stem}_raw.txt"
 
     # Save the uploaded PDF file to disk
     try:
@@ -287,13 +283,19 @@ async def upload_document(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to save PDF file: {e}"
-        )
-
-    # --- MODIFIED: Extract text from PDF using pdfminer.six ---
+        )    # --- MODIFIED: Extract text from PDF using pdfminer.six ---
     extracted_text = ""
+    raw_extracted_text = ""
     try:
         # Use pdfminer_extract_text directly
-        extracted_text = pdfminer_extract_text(str(pdf_file_location))
+        raw_extracted_text = pdfminer_extract_text(str(pdf_file_location))
+        
+        # Save the completely raw extracted text to a separate file
+        with open(raw_text_file_location, "w", encoding="utf-8") as raw_text_file:
+            raw_text_file.write(raw_extracted_text)
+
+        # Now create the processed version for AI/analysis
+        extracted_text = raw_extracted_text
 
         # --- Start of Replacement Block ---
         # 1. Replace sequences of two or more newlines with a double newline (a standard paragraph break).
@@ -317,18 +319,15 @@ async def upload_document(
         extracted_text = extracted_text.replace('\r\n', ' ').replace('\n', ' ').replace('\r', ' ')
         # 3. Replace any sequence of whitespace (including multiple spaces) with a single space and strip leading/trailing
         extracted_text = re.sub(r'\s+', ' ', extracted_text).strip()
-        # --- End of Robust Cleaning ---
-
-        # NEW PRINT: Inspect the final cleaned text before SpaCy/Gemini
-        print(f"DEBUG: Final Cleaned Extracted Text (first 500 chars):\n{extracted_text[:500]}...\n---End Final Cleaned Text---")
-
-        # Save the extracted text to a .txt file
+        # --- End of Robust Cleaning ---        print(f"DEBUG: Final Cleaned Extracted Text (first 500 chars):\n{extracted_text[:500]}...\n---End Final Cleaned Text---")# Save the processed extracted text to a .txt file (for AI processing)
         with open(text_file_location, "w", encoding="utf-8") as text_file:
             text_file.write(extracted_text)
 
     except Exception as e:
         if pdf_file_location.exists():
             os.remove(pdf_file_location)
+        if raw_text_file_location.exists():
+            os.remove(raw_text_file_location)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to extract text from PDF using pdfminer.six: {e}. Please ensure the PDF is not password-protected or corrupted."
@@ -412,16 +411,15 @@ async def upload_document(
             print(f"Warning: Failed to generate embeddings for {file.filename}: {e}")
             embeddings_json_string = None
     else:
-        embeddings_json_string = None
-
-    # Save document metadata, entities, and clauses to the database
+        embeddings_json_string = None    # Save document metadata, entities, and clauses to the database
     try:
         db_document = Document(
             filename=file.filename,
             upload_date=datetime.utcnow(),
             status="processed_text",
             path_to_text=str(text_file_location),
-            embeddings=embeddings_json_string
+            embeddings=embeddings_json_string,
+            subject=subject
         )
         db.add(db_document)
 
@@ -453,8 +451,7 @@ async def upload_document(
             "text_location": db_document.path_to_text,
             "id": db_document.id,
             "embeddings_saved": bool(document_embeddings),
-            "entities_identified": len(all_entities_to_save),
-            "message": "PDF uploaded, text, entities & clauses extracted, metadata saved successfully!"
+            "entities_identified": len(all_entities_to_save),            "message": "PDF uploaded, text, entities & clauses extracted, metadata saved successfully!"
         }
     except Exception as e:
         db.rollback()
@@ -462,6 +459,8 @@ async def upload_document(
             os.remove(pdf_file_location)
         if text_file_location.exists():
             os.remove(text_file_location)
+        if raw_text_file_location.exists():
+            os.remove(raw_text_file_location)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to save metadata or entities/clauses to DB: {e}. Files were cleaned up."
@@ -750,21 +749,232 @@ async def test_chunking(text: str = Body(..., embed=True)):
 @app.post("/api/analyze-policy/")
 async def analyze_policy(policy_text: str = Body(..., embed=True)):
     """
-    Endpoint for analyzing user-provided policy text against regulatory clauses.
-    For now, returns a placeholder response.
+    Comprehensive endpoint for analyzing user-provided policy text.
+    Provides detailed analysis, gap identification, and improvement recommendations.
     """
     if not policy_text.strip():
         raise HTTPException(status_code=400, detail="Policy text cannot be empty for analysis.")
 
-    # In future steps, this is where you'd implement:
-    # 1. Text extraction (already done for docs, here it's direct text input)
-    # 2. Embedding generation for policy_text
-    # 3. Semantic search against COMPLIANCE_CLAUSE entities from your DB
-    # 4. LLM call (Gemini) to draft suggestions based on matches/gaps
+    try:
+        # Initialize Gemini model
+        model = genai.GenerativeModel(GEMINI_MODEL_NAME)
+          # Simplified, user-friendly policy analysis prompt
+        analysis_prompt = f"""
+        You are a friendly compliance expert helping businesses improve their policies. Analyze this policy document and provide a clear, easy-to-understand review.
 
-    placeholder_response = {
-        "status": "Analysis pending",
-        "message": "Policy received for analysis. AI suggestions will be generated soon!",
-        "received_text_length": len(policy_text)
-    }
-    return placeholder_response
+        Policy Document:
+        ---
+        {policy_text}
+        ---
+
+        Please provide your analysis in this simple, conversational format:
+
+        ## What This Policy Is About
+        Briefly describe what type of policy this is and its main purpose (2-3 sentences).
+
+        ## Overall Assessment
+        Give an honest, straightforward assessment of the policy's current state. Is it comprehensive, basic, or needs significant work? (2-3 sentences)
+
+        ## What's Working Well
+        List 3-4 specific strengths of this policy. What does it do right?
+
+        ## What Needs Improvement
+        List the top 4-5 most important areas that need attention. Be specific and practical:
+        - Area 1: Brief description and why it matters
+        - Area 2: Brief description and why it matters  
+        - Area 3: Brief description and why it matters
+        (etc.)
+
+        ## Quick Win Recommendations
+        Suggest 3-4 specific, actionable steps they can take immediately to improve the policy:
+        1. [Specific action]
+        2. [Specific action]
+        3. [Specific action]
+
+        ## Priority Level
+        Rate the urgency of updating this policy as: LOW, MEDIUM, or HIGH and explain why in 1-2 sentences.
+
+        Keep the language simple, practical, and encouraging. Focus on actionable advice rather than technical compliance jargon.
+        """        # Generate simplified analysis
+        response = model.generate_content(
+            analysis_prompt,
+            generation_config=genai.types.GenerationConfig(max_output_tokens=1500)
+        )
+        
+        analysis_result = response.text.strip()
+        
+        if not analysis_result:
+            raise HTTPException(status_code=500, detail="AI analysis returned empty response.")
+
+        # Simple overall score calculation based on policy length and completeness
+        word_count = len(policy_text.split())
+        
+        # Basic scoring: longer, more detailed policies tend to be more comprehensive
+        if word_count < 100:
+            overall_score = 3.0
+        elif word_count < 300:
+            overall_score = 5.0
+        elif word_count < 800:
+            overall_score = 7.0
+        else:
+            overall_score = 8.5
+
+        return {
+            "status": "completed",
+            "analysis": analysis_result,
+            "metadata": {
+                "text_length": len(policy_text),
+                "word_count": word_count,
+                "analysis_timestamp": datetime.utcnow().isoformat(),
+                "overall_compliance_score": overall_score
+            },
+            "recommendations_summary": {
+                "high_priority": "Review the specific improvement areas identified in the analysis",
+                "next_steps": "Start with the 'Quick Win Recommendations' to make immediate improvements"
+            }
+        }
+
+    except InvalidArgument as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Gemini API Invalid Argument for policy analysis: {e}"
+        )
+    except ResourceExhausted:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Gemini API quota exceeded for policy analysis. Please try again later."
+        )
+    except GoogleAPIError as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Google Gemini API error during policy analysis: {e}"
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"An unexpected error occurred during policy analysis: {e}"
+        )
+
+@app.get("/api/documents/{document_id}/raw-text", response_model=str) # Return completely raw text
+async def get_document_raw_text(document_id: int, db: Session = Depends(get_db)):
+    """
+    Endpoint to retrieve the completely raw, unprocessed text content of a specific document.
+    This returns the document exactly as extracted from PDF without any cleaning or normalization.
+    Falls back to processed text if raw text file doesn't exist (for backwards compatibility).
+    """
+    document = db.query(Document).filter(Document.id == document_id).first()
+    if not document:
+        raise HTTPException(status_code=404, detail="Document not found in database")
+    
+    if not document.path_to_text:
+        raise HTTPException(status_code=404, detail=f"No text file path found for document ID {document_id}")
+    
+    # Debug: Print the stored path
+    print(f"DEBUG: Stored path in database: {document.path_to_text}")
+    
+    # First, try to get the raw text file (for newly uploaded documents)
+    processed_path = Path(document.path_to_text)
+    
+    # Handle different path scenarios
+    if processed_path.name.endswith('.txt.txt'):
+        # Double extension case - try multiple approaches
+        base_name = processed_path.name[:-8]  # Remove '.txt.txt'
+        
+        # Priority order for raw files:
+        raw_paths_to_try = [
+            processed_path.parent / f"{base_name}_raw.txt",  # Corrected raw path
+            processed_path.parent / f"{processed_path.stem}_raw{processed_path.suffix}",  # Normal raw path
+        ]
+        
+        # Priority order for processed files:
+        processed_paths_to_try = [
+            processed_path,  # Original stored path (exists per debug)
+            processed_path.parent / f"{base_name}.txt",  # Corrected processed path
+        ]
+        
+        print(f"DEBUG: Double extension detected for '{processed_path.name}'")
+        print(f"DEBUG: Base name: '{base_name}'")
+        
+    else:
+        # Normal case
+        raw_paths_to_try = [
+            processed_path.parent / f"{processed_path.stem}_raw{processed_path.suffix}",
+        ]
+        processed_paths_to_try = [
+            processed_path,
+        ]
+        print(f"DEBUG: Normal path processing for '{processed_path.name}'")
+    
+    # Try raw files first
+    for raw_path in raw_paths_to_try:
+        if raw_path.exists():
+            print(f"DEBUG: Found raw text file: {raw_path}")
+            try:
+                with open(raw_path, "r", encoding="utf-8") as f:
+                    raw_text_content = f.read()
+                return raw_text_content
+            except Exception as e:
+                print(f"ERROR: Failed to read raw file {raw_path}: {e}")
+                continue
+    
+    # Fallback to processed files
+    print(f"DEBUG: No raw text files found, trying processed files...")
+    for processed_path_option in processed_paths_to_try:
+        if processed_path_option.exists():
+            print(f"DEBUG: Found processed text file: {processed_path_option}")
+            try:
+                with open(processed_path_option, "r", encoding="utf-8") as f:
+                    fallback_text_content = f.read()
+                print(f"DEBUG: Successfully read {len(fallback_text_content)} characters from processed file")
+                return fallback_text_content
+            except Exception as e:
+                print(f"ERROR: Failed to read processed file {processed_path_option}: {e}")
+                continue
+    
+    # If we get here, no files were found
+    all_tried_paths = raw_paths_to_try + processed_paths_to_try
+    raise HTTPException(
+        status_code=404, 
+        detail=f"No text files found for document ID {document_id}. Tried paths: {[str(p) for p in all_tried_paths]}"    )
+
+@app.get("/api/documents/{document_id}/pdf")
+async def get_document_pdf(document_id: int, db: Session = Depends(get_db)):
+    """
+    Endpoint to serve the original PDF file for viewing in browser.
+    """
+    document = db.query(Document).filter(Document.id == document_id).first()
+    if not document:
+        raise HTTPException(status_code=404, detail="Document not found in database")
+    
+    # Construct the path to the original PDF file
+    if not document.path_to_text:
+        raise HTTPException(status_code=404, detail="No file path information found for this document")
+    
+    # Get the PDF path from the text path (text path is like "uploads/filename.txt", PDF is "uploads/filename.pdf")
+    text_path = Path(document.path_to_text)
+    
+    # Handle the double extension case for finding the original PDF
+    if text_path.name.endswith('.txt.txt'):
+        # For files like "security_policy_test_03.txt.txt", the original PDF was "security_policy_test_03.txt.pdf"
+        base_name = text_path.name[:-8]  # Remove '.txt.txt'
+        pdf_filename = f"{base_name}.pdf"
+    else:
+        # Normal case: "filename.txt" -> "filename.pdf"
+        pdf_filename = f"{text_path.stem}.pdf"
+    
+    pdf_path = text_path.parent / pdf_filename
+    
+    print(f"DEBUG: Looking for PDF at: {pdf_path}")
+    
+    if not pdf_path.exists():
+        raise HTTPException(status_code=404, detail=f"Original PDF file not found: {pdf_path}")
+    
+    # Return the PDF file with proper headers for browser viewing
+    return FileResponse(
+        path=str(pdf_path),
+        media_type="application/pdf",
+        headers={
+            "Content-Disposition": f"inline; filename={document.filename}",
+            "Cache-Control": "no-cache"
+        }
+    )

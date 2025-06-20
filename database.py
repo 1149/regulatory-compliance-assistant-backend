@@ -28,6 +28,7 @@ class Document(Base):
     status = Column(String, default="pending_processing")  # e.g., 'pending', 'processed', 'error'
     path_to_text = Column(String, nullable=True)  # Path to where the extracted text file will be stored
     embeddings = Column(Text, nullable=True)  # NEW: Column to store embeddings as TEXT (JSON string)
+    subject = Column(String, nullable=True)  # NEW: Subject/category of the document
 
     # Relationship to Entity
     entities = relationship("Entity", back_populates="document")
@@ -58,6 +59,7 @@ class DocumentSchema(BaseModel):
     status: str
     path_to_text: Optional[str] = None  # Optional because it can be nullable in DB
     embeddings: Optional[str] = None  # NEW: Add embeddings to schema
+    subject: Optional[str] = None  # NEW: Add subject to schema
 
     class Config:
         from_attributes = True
