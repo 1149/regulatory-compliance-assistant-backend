@@ -7,21 +7,21 @@
 
 > **An intelligent FastAPI backend for automated document processing, compliance analysis, and regulatory insights powered by AI.**
 
-## 🌟 Overview
+##  Overview
 
 The **Regulatory Compliance Assistant** is a sophisticated backend system designed to help organizations manage, analyze, and ensure compliance with regulatory documents. Using cutting-edge AI technologies, it automatically processes PDF documents, extracts key entities, identifies compliance clauses, and provides intelligent Q&A capabilities.
 
-### 🎯 **Key Features**
+###  **Key Features**
 
-- **📄 Smart Document Processing** - Automatic PDF text extraction and cleaning
-- **🤖 AI-Powered Analysis** - Entity extraction and compliance clause identification  
-- **💬 Intelligent Q&A** - RAG (Retrieval Augmented Generation) for document queries
-- **🔍 Advanced Search** - Semantic search across document collections
-- **📊 Entity Recognition** - Automated extraction of people, organizations, dates, and compliance terms
-- **🏗️ Modular Architecture** - Clean, maintainable, and scalable codebase
-- **🚀 High Performance** - Optimized for handling large document volumes
+- ** Smart Document Processing** - Automatic PDF text extraction and cleaning
+- ** AI-Powered Analysis** - Entity extraction and compliance clause identification  
+- ** Intelligent Q&A** - RAG (Retrieval Augmented Generation) for document queries
+- ** Advanced Search** - Semantic search across document collections
+- ** Entity Recognition** - Automated extraction of people, organizations, dates, and compliance terms
+- **🏗 Modular Architecture** - Clean, maintainable, and scalable codebase
+- ** High Performance** - Optimized for handling large document volumes
 
-## 🤖 AI Capabilities
+##  AI Capabilities
 
 ### **Dual AI Engine Support**
 - **🌐 Google Gemini AI** - Cloud-based AI for advanced analysis and embeddings
@@ -50,22 +50,22 @@ The **Regulatory Compliance Assistant** is a sophisticated backend system design
 ### **Clean, Modular Design**
 ```
 regulatory-compliance-assistant-backend/
-├── 🎯 main.py                    # FastAPI application entry point
-├── ⚙️ config.py                  # Configuration and environment settings
-├── 🗄️ database.py                # SQLAlchemy models and schemas
-├── 📦 requirements.txt           # Python dependencies
+├──  main.py                    # FastAPI application entry point
+├──  config.py                  # Configuration and environment settings
+├──  database.py                # SQLAlchemy models and schemas
+├──  requirements.txt           # Python dependencies
 │
 ├── 🔧 Core AI & Processing/
-│   ├── 🧠 ai_services.py         # Google Gemini AI integration
-│   ├── 🏠 ollama_service.py      # Local Ollama LLM service
-│   ├── 🔤 nlp_utils.py           # SpaCy NLP and entity processing
-│   ├── 📝 text_utils.py          # Text cleaning and document formatting
-│   └── 📁 file_utils.py          # File operations and management
+│   ├──  ai_services.py         # Google Gemini AI integration
+│   ├──  ollama_service.py      # Local Ollama LLM service
+│   ├──  nlp_utils.py           # SpaCy NLP and entity processing
+│   ├──  text_utils.py          # Text cleaning and document formatting
+│   └──  file_utils.py          # File operations and management
 │
 ├── 🛣️ API Routes/
-│   ├── 📋 document_routes.py     # Document management endpoints
-│   ├── 📤 upload_routes.py       # File upload and processing
-│   └── 🤖 ai_routes.py           # AI analysis and Q&A endpoints
+│   ├──  document_routes.py     # Document management endpoints
+│   ├──  upload_routes.py       # File upload and processing
+│   └──  ai_routes.py           # AI analysis and Q&A endpoints
 │
 └── 📁 uploads/                   # Document storage
 ```
