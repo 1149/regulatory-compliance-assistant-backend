@@ -1,4 +1,51 @@
-venv/
+# Python
 __pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+ENV/
+.venv/
+
+# Environment variables
 .env
-uploads
+.env.local
+.env.production
+
+# Database
+*.db
+*.sqlite3
+compliance.db
+
+# Uploads and temporary files
+uploads/
+temp/
+*.tmp
+*.log
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+
+# Documentation
+docs/_build/
+
+# Distribution / packaging
+build/
+dist/
+*.egg-info/

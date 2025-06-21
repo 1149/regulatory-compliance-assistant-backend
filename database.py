@@ -1,16 +1,11 @@
 from sqlalchemy import create_engine, Column, Integer, String, DateTime, ForeignKey, Text 
 from sqlalchemy.orm import sessionmaker, declarative_base, relationship
 from datetime import datetime
-import os
-from dotenv import load_dotenv
 from pydantic import BaseModel
 from typing import Optional
 import json 
+from config import DATABASE_URL
 
-load_dotenv()
-
-# --- Database Configuration ---
-DATABASE_URL = os.getenv("DATABASE_URL")
 if not DATABASE_URL:
     raise ValueError("DATABASE_URL environment variable not set. Please create a .env file with it.")
 
