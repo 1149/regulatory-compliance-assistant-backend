@@ -9,6 +9,8 @@ env/
 ENV/
 .venv/
 
+# docker-compose.yml
+# .gitpod.yml
 # Environment variables
 .env
 .env.local

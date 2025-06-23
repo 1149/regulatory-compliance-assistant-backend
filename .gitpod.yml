@@ -8,4 +8,10 @@ tasks:
   - init: pip install -r requirements.txt
     command: python main.py
 
-
+ports:
+  - port: 3000
+    onOpen: open-browser # For frontend access
+  - port: 8000
+    onOpen: ignore     # For backend access
+  - port: 5433         # For DB access if mapped to 5433, or 5432 if using that
+    onOpen: ignore
