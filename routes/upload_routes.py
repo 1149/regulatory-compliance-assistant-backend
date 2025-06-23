@@ -1,8 +1,11 @@
 # File upload and management routes
 import os
+import hashlib
+import tempfile
+import uuid
 from datetime import datetime
 from pathlib import Path
-from fastapi import APIRouter, Depends, UploadFile, File, HTTPException, status, Form
+from fastapi import APIRouter, Depends, UploadFile, File, HTTPException, status, Form, Request
 from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 from pdfminer.high_level import extract_text as pdfminer_extract_text
@@ -12,6 +15,7 @@ from file_utils import setup_upload_directory, get_file_paths, determine_pdf_pat
 from text_utils import clean_extracted_text
 from nlp_utils import extract_entities_with_spacy, post_process_spacy_entities
 from ai_services import identify_compliance_clauses, generate_document_embeddings
+from security_utils import comprehensive_file_validation, quarantine_file, calculate_file_hash
 
 router = APIRouter(prefix="/api", tags=["upload"])
 
@@ -24,36 +28,73 @@ def get_db():
 
 @router.post("/upload-document/")
 async def upload_document(
+    request: Request,
     file: UploadFile = File(...),
     subject: str = Form(...),
     db: Session = Depends(get_db)
 ):
-    """Upload and process a PDF document."""
-    # Validate PDF file
-    if not file.filename.lower().endswith(".pdf"):
+    """Upload and process a document (PDF, Word, or TXT) with security validation."""
+    
+    # SECURITY: Comprehensive file validation
+    is_safe, validation_message, file_content = await comprehensive_file_validation(file)
+    
+    if not is_safe:
+        # If file is potentially malicious, quarantine it
+        if file_content:
+            quarantine_path = quarantine_file(file_content, file.filename, validation_message)
+            print(f"SECURITY ALERT: File quarantined - {file.filename} -> {quarantine_path}")
+            print(f"Reason: {validation_message}")
+        
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Only PDF files are allowed."
+            detail=f"File rejected for security reasons: {validation_message}"
         )
     
+    # Generate secure filename to prevent conflicts and path traversal
+    file_hash = calculate_file_hash(file_content)[:8]
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    original_stem = Path(file.filename).stem
+    file_extension = Path(file.filename).suffix.lower()
+    
+    # Create secure filename: timestamp_hash_originalname.ext
+    secure_filename = f"{timestamp}_{file_hash}_{original_stem}{file_extension}"
+    
     upload_dir = setup_upload_directory()
-    pdf_path, text_path, raw_text_path = get_file_paths(file.filename, upload_dir)
+    file_path = upload_dir / secure_filename
+    text_path = upload_dir / f"{timestamp}_{file_hash}_{original_stem}.txt"
+    raw_text_path = upload_dir / f"{timestamp}_{file_hash}_{original_stem}_raw.txt"
 
-    # Save uploaded PDF file
+    # Save uploaded file with security-validated content
     try:
-        with open(pdf_path, "wb+") as file_object:
-            content = await file.read()
-            file_object.write(content)
+        with open(file_path, "wb") as file_object:
+            file_object.write(file_content)
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to save PDF file: {e}"
+            detail=f"Failed to save file: {e}"
         )
 
-    # Extract and process text
+    # Extract and process text based on file type
     try:
-        # Extract raw text using pdfminer
-        raw_extracted_text = pdfminer_extract_text(str(pdf_path))
+        if file_extension == '.pdf':
+            # Extract raw text using pdfminer for PDFs
+            raw_extracted_text = pdfminer_extract_text(str(file_path))
+        elif file_extension == '.txt':
+            # Read text files directly
+            with open(file_path, "r", encoding="utf-8") as f:
+                raw_extracted_text = f.read()
+        elif file_extension in ['.doc', '.docx']:
+            # For Word documents, we'll need python-docx library
+            # For now, raise an error and suggest PDF conversion
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Word document processing not implemented yet. Please convert to PDF or TXT."
+            )
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Unsupported file type"
+            )
         
         # Save raw text
         with open(raw_text_path, "w", encoding="utf-8") as raw_text_file:
@@ -70,12 +111,12 @@ async def upload_document(
 
     except Exception as e:
         # Cleanup files on error
-        for path in [pdf_path, raw_text_path]:
+        for path in [file_path, raw_text_path]:
             if path.exists():
                 os.remove(path)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to extract text from PDF: {e}"
+            detail=f"Failed to extract text from file: {e}"
         )
 
     # Identify compliance clauses
@@ -130,13 +171,13 @@ async def upload_document(
             "id": db_document.id,
             "embeddings_saved": bool(embeddings_json_string),
             "entities_identified": len(all_entities_to_save),
-            "message": "PDF uploaded, text, entities & clauses extracted, metadata saved successfully!"
+            "message": "Document uploaded, text extracted, entities & clauses extracted, metadata saved successfully!"
         }
         
     except Exception as e:
         db.rollback()
         # Cleanup files on database error
-        for path in [pdf_path, text_path, raw_text_path]:
+        for path in [file_path, text_path, raw_text_path]:
             if path.exists():
                 os.remove(path)
         raise HTTPException(

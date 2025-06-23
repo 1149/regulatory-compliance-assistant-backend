@@ -25,8 +25,8 @@ app = FastAPI(
 # Configure CORS middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=CORS_ORIGINS,
-    allow_credentials=True,
+    allow_credentials=False,  # Set to False for GitPod to avoid credential issues
+    allow_origins=["*"],
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -68,3 +68,17 @@ async def test_db_connection(db: Session = Depends(get_db)):
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Database connection failed: {e}"
         )
+
+@app.get("/debug/cors")
+async def debug_cors():
+    """Debug endpoint to check CORS configuration and headers."""
+    import os
+    return {
+        "cors_configured": True,
+        "allow_origins": ["*"],
+        "allow_methods": ["*"],
+        "allow_headers": ["*"],
+        "allow_credentials": False,
+        "gitpod_workspace_url": os.getenv("GITPOD_WORKSPACE_URL", "Not set"),
+        "message": "CORS debugging endpoint"
+    }

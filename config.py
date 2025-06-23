@@ -27,8 +27,15 @@ CHUNK_OVERLAP = 100  # Number of characters to overlap between chunks
 CORS_ORIGINS = [
     "http://localhost:3000",
     "http://127.0.0.1:3000",
+    "https://*.gitpod.io",
     # Add any other origins where your frontend might be running
 ]
 
 # --- File Upload Configuration ---
 UPLOAD_DIR_NAME = "uploads"
+MAX_FILE_SIZE = 10 * 1024 * 1024  # 10MB limit
+ALLOWED_EXTENSIONS = {'.pdf', '.txt', '.doc', '.docx'}
+
+# Security settings
+ENABLE_FILE_QUARANTINE = True
+QUARANTINE_DIR = "quarantine"

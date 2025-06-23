@@ -116,4 +116,14 @@ async def analyze_policy(policy_text: str = Body(..., embed=True)):
     if not policy_text.strip():
         raise HTTPException(status_code=400, detail="Policy text cannot be empty for analysis.")
     
+    # Character limit check for public deployment safety
+    MAX_CHARACTERS = 100000  # 100k character limit
+    if len(policy_text) > MAX_CHARACTERS:
+        raise HTTPException(
+            status_code=400, 
+            detail=f"Policy text is too large ({len(policy_text):,} characters). "
+                   f"Please limit to {MAX_CHARACTERS:,} characters or less. "
+                   f"Consider breaking large documents into smaller sections for analysis."
+        )
+    
     return analyze_policy_text(policy_text)

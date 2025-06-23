@@ -9,6 +9,41 @@ from config import GEMINI_MODEL_NAME, GOOGLE_API_KEY
 # Configure Gemini API
 genai.configure(api_key=GOOGLE_API_KEY)
 
+# Gemini API Limits for gemini-1.5-flash
+MAX_INPUT_TOKENS = 1048576  # ~1M tokens (approximately 750K-800K characters)
+MAX_CHARS_SAFE_LIMIT = 600000  # 600K characters for safety margin
+MAX_WORDS_SAFE_LIMIT = 100000  # ~100K words for safety
+
+def truncate_text_safely(text: str, max_chars: int = MAX_CHARS_SAFE_LIMIT) -> tuple[str, bool]:
+    """
+    Safely truncate text to fit within API limits.
+    Returns (truncated_text, was_truncated)
+    """
+    if len(text) <= max_chars:
+        return text, False
+    
+    # Try to truncate at a sentence boundary near the limit
+    truncated = text[:max_chars]
+    last_sentence = max(
+        truncated.rfind('.'),
+        truncated.rfind('!'),
+        truncated.rfind('?')
+    )
+    
+    if last_sentence > max_chars * 0.8:  # If we found a sentence ending in the last 20%
+        truncated = truncated[:last_sentence + 1]
+    
+    return truncated, True
+
+def get_text_stats(text: str) -> dict:
+    """Get basic statistics about the text."""
+    return {
+        "character_count": len(text),
+        "word_count": len(text.split()),
+        "estimated_tokens": len(text) // 4,  # Rough estimate: 4 chars per token
+        "within_limits": len(text) <= MAX_CHARS_SAFE_LIMIT
+    }
+
 def identify_compliance_clauses(text: str, filename: str):
     """Identify compliance clauses using Gemini AI."""
     identified_clauses_data = []    
@@ -68,6 +103,14 @@ IDENTIFIED COMPLIANCE CLAUSES:"""
 
             print(f"DEBUG: identified_clauses_data after loop: {identified_clauses_data}")
 
+    except InvalidArgument as e:
+        print(f"Warning: Gemini API Invalid Argument for compliance clause identification in {filename}: {e}")
+    except ResourceExhausted:
+        print(f"🚨 Google Gemini API quota exceeded! This app uses a FREE API plan with only 50 requests per day. "
+              f"The quota resets daily. Please try again tomorrow, or you can get your own free API key at: "
+              f"https://makersuite.google.com/app/apikey")
+    except GoogleAPIError as e:
+        print(f"Warning: Google Gemini API error during compliance clause identification in {filename}: {e}")
     except Exception as e:
         print(f"Warning: Failed to identify compliance clauses for {filename} with Gemini: {e}")
     
@@ -87,6 +130,17 @@ def generate_document_embeddings(text: str, filename: str):
         )
         document_embeddings = response['embedding']
         return json.dumps(document_embeddings)
+    except InvalidArgument as e:
+        print(f"Warning: Gemini API Invalid Argument for document embeddings in {filename}: {e}")
+        return None
+    except ResourceExhausted:
+        print(f"🚨 Google Gemini API quota exceeded! This app uses a FREE API plan with only 50 requests per day. "
+              f"The quota resets daily. Please try again tomorrow, or you can get your own free API key at: "
+              f"https://makersuite.google.com/app/apikey")
+        return None
+    except GoogleAPIError as e:
+        print(f"Warning: Google Gemini API error during document embeddings for {filename}: {e}")
+        return None
     except Exception as e:
         print(f"Warning: Failed to generate embeddings for {filename}: {e}")
         return None
@@ -101,6 +155,23 @@ def generate_query_embedding(query: str):
             task_type="RETRIEVAL_QUERY"
         )
         return query_embedding_response['embedding']
+    except InvalidArgument as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Gemini API Invalid Argument for query embedding: {e}"
+        )
+    except ResourceExhausted:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="🚨 Google Gemini API quota exceeded! This app uses a FREE API plan with only 50 requests per day. "
+                   "The quota resets daily. Please try again tomorrow, or you can get your own free API key at: "
+                   "https://makersuite.google.com/app/apikey"
+        )
+    except GoogleAPIError as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Google Gemini API error during query embedding: {e}"
+        )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to generate query embedding: {e}")
 
@@ -113,6 +184,17 @@ def generate_chunk_embedding(chunk: str):
             task_type="RETRIEVAL_DOCUMENT"
         )
         return chunk_embedding_response['embedding']
+    except InvalidArgument as e:
+        print(f"Warning: Gemini API Invalid Argument for chunk embedding: {e}")
+        return None
+    except ResourceExhausted:
+        print(f"🚨 Google Gemini API quota exceeded! This app uses a FREE API plan with only 50 requests per day. "
+              f"The quota resets daily. Please try again tomorrow, or you can get your own free API key at: "
+              f"https://makersuite.google.com/app/apikey")
+        return None
+    except GoogleAPIError as e:
+        print(f"Warning: Google Gemini API error during chunk embedding: {e}")
+        return None
     except Exception:
         return None
 
@@ -150,7 +232,9 @@ def generate_summary(text: str):
     except ResourceExhausted:
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-            detail="Gemini API quota exceeded or rate limit reached. Please check your Google Cloud Console usage."
+            detail="🚨 Google Gemini API quota exceeded! This app uses a FREE API plan with only 50 requests per day. "
+                   "The quota resets daily. Please try again tomorrow, or you can get your own free API key at: "
+                   "https://makersuite.google.com/app/apikey"
         )
     except GoogleAPIError as e:
         raise HTTPException(
@@ -200,7 +284,9 @@ def generate_rag_answer(context: str, query: str):
     except ResourceExhausted:
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-            detail="Gemini API quota exceeded for RAG. Please check your Google Cloud Console usage."
+            detail="🚨 Google Gemini API quota exceeded! This app uses a FREE API plan with only 50 requests per day. "
+                   "The quota resets daily. Please try again tomorrow, or you can get your own free API key at: "
+                   "https://makersuite.google.com/app/apikey"
         )
     except GoogleAPIError as e:
         raise HTTPException(
@@ -213,16 +299,21 @@ def generate_rag_answer(context: str, query: str):
             detail=f"An unexpected error occurred during RAG answer generation: {e}"
         )
 
-def analyze_policy_text(policy_text: str):
+async def analyze_policy_text(policy_text: str):
     """Analyze policy text using Gemini AI."""
     try:
+        # Truncate policy text to stay within safe character limits
+        truncated_policy_text, was_truncated = truncate_text_safely(policy_text)
+        if was_truncated:
+            print(f"Warning: Policy text for analysis was truncated to {MAX_CHARS_SAFE_LIMIT} characters.")
+
         model = genai.GenerativeModel(GEMINI_MODEL_NAME)
         analysis_prompt = f"""
         You are a friendly compliance expert helping businesses improve their policies. Analyze this policy document and provide a clear, easy-to-understand review.
 
         Policy Document:
         ---
-        {policy_text}
+        {truncated_policy_text}
         ---
 
         Please provide your analysis in this simple, conversational format:
@@ -279,14 +370,23 @@ def analyze_policy_text(policy_text: str):
             "status": "completed",
             "analysis": analysis_result,
             "metadata": {
-                "text_length": len(policy_text),
+                "original_text_length": len(policy_text),
+                "processed_text_length": len(truncated_policy_text),
                 "word_count": word_count,
+                "was_truncated": was_truncated,
+                "character_limit": MAX_CHARS_SAFE_LIMIT,
                 "analysis_timestamp": datetime.utcnow().isoformat(),
                 "overall_compliance_score": overall_score
             },
             "recommendations_summary": {
                 "high_priority": "Review the specific improvement areas identified in the analysis",
                 "next_steps": "Start with the 'Quick Win Recommendations' to make immediate improvements"
+            },
+            "api_limitations": {
+                "text_truncated": was_truncated,
+                "max_characters_supported": MAX_CHARS_SAFE_LIMIT,
+                "truncation_message": f"Your policy text was {len(policy_text):,} characters. Only the first {len(truncated_policy_text):,} characters were analyzed." if was_truncated else None,
+                "suggestion": "For complete analysis of very large documents, consider breaking them into smaller sections." if was_truncated else None
             }
         }
 
@@ -298,7 +398,9 @@ def analyze_policy_text(policy_text: str):
     except ResourceExhausted:
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-            detail="Gemini API quota exceeded for policy analysis. Please try again later."
+            detail="🚨 Google Gemini API quota exceeded! This app uses a FREE API plan with only 50 requests per day. "
+                   "The quota resets daily. Please try again tomorrow, or you can get your own free API key at: "
+                   "https://makersuite.google.com/app/apikey"
         )
     except GoogleAPIError as e:
         raise HTTPException(

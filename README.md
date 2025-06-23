@@ -7,6 +7,14 @@
 
 > **An intelligent FastAPI backend that automates regulatory document processing, compliance analysis, and provides AI-powered insights for enterprise compliance workflows.**
 
+## ⚡ Important Notice - Demo Limitations
+
+> **🚨 This is a public demo using Google Gemini's FREE API tier**  
+> **📊 API Quota: 50 requests per day (shared among all users)**  
+> **🔄 Quota resets daily at midnight UTC**  
+> 
+> If you see "API quota exceeded" errors, the daily limit has been reached. Please try again tomorrow or get your own free API key at: https://makersuite.google.com/app/apikey
+
 ## Overview
 
 A sophisticated backend system leveraging cutting-edge AI technologies to transform how organizations handle regulatory compliance. Built with modern Python frameworks and enterprise-grade architecture patterns.

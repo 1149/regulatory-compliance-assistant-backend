@@ -1,5 +1,5 @@
 # Use an official Python runtime as a parent image
-FROM python:3.11-slim-buster 
+FROM python:3.11-slim-buster
 # Use Python 3.11 or higher for numpy compatibility
 
 # Set the working directory in the container

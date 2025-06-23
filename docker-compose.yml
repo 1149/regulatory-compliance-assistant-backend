@@ -24,13 +24,12 @@ services:
     volumes:
       - ./frontend:/app # Mount frontend code for dev hot-reloading
       - /app/node_modules # Prevents overwriting node_modules inside container
-
   db:
     image: postgres:15-alpine
     environment:
       POSTGRES_DB: compliance_db
       POSTGRES_USER: compliance_user
-      POSTGRES_PASSWORD: ${DB_PASSWORD}
+      POSTGRES_PASSWORD: "1593"
     ports:
       - "5433:5432" # Changed to 5433 to avoid port conflicts, or use 5432:5432 if you know it's free
     volumes:
