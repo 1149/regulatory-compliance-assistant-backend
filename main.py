@@ -11,6 +11,11 @@ from database import SessionLocal, engine, Base, Document
 from routes.document_routes import router as document_router
 from routes.upload_routes import router as upload_router
 from routes.ai_routes import router as ai_router
+from routes.cleanup_routes import router as cleanup_router
+
+# Import cleanup service
+from cleanup_service import cleanup_service
+import asyncio
 
 # Create all database tables
 Base.metadata.create_all(bind=engine)
@@ -43,6 +48,26 @@ def get_db():
 app.include_router(document_router)
 app.include_router(upload_router)
 app.include_router(ai_router)
+app.include_router(cleanup_router)
+
+# Startup and shutdown events for cleanup service
+@app.on_event("startup")
+async def startup_event():
+    """Start the background cleanup service when the application starts."""
+    print("🚀 Starting Regulatory Compliance Assistant API...")
+    print("📁 Starting automatic file cleanup service (2-hour retention)...")
+    
+    # Start the cleanup service in the background
+    asyncio.create_task(cleanup_service.start_background_cleanup())
+    
+    print("✅ Application startup complete")
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    """Stop the background cleanup service when the application shuts down."""
+    print("🛑 Shutting down Regulatory Compliance Assistant API...")
+    cleanup_service.stop_background_cleanup()
+    print("✅ Cleanup service stopped")
 
 # Root endpoints
 @app.get("/")
